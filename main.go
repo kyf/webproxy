@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -63,26 +64,47 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 
+	var wg sync.WaitGroup
+
 	go func() {
+		//client read
+		wg.Add(1)
 		for {
-			_, message, err := c.ReadMessage()
+			mt, message, err := c.ReadMessage()
 			if err != nil {
-				log.Print("read err:", err)
+				log.Print("response read err:", err)
 				return
 			}
-			log.Printf("recv: %s", message)
+			log.Printf("response receive: %s", string(message))
+			err = conn.WriteMessage(mt, message)
+			if err != nil {
+				log.Print("response write err:", err)
+				return
+			}
 		}
+		wg.Done()
 	}()
 
-	for {
-		mt, msg, err := conn.ReadMessage()
-		if err != nil {
-			log.Print("readMessage err:", err)
-			break
+	go func() {
+		//server read
+		wg.Add(1)
+		for {
+			mt, msg, err := conn.ReadMessage()
+			if err != nil {
+				log.Print("request readMessage err:", err)
+				break
+			}
+			log.Print("request receive :", string(msg), mt)
+			err = c.WriteMessage(mt, msg)
+			if err != nil {
+				log.Print("request read err:", err)
+				return
+			}
 		}
-		log.Print("receive :", string(msg), mt)
+		wg.Done()
+	}()
 
-	}
+	wg.Wait()
 }
 
 func main() {
