@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -47,64 +46,90 @@ func monitor(data []byte, r *http.Request) {
 	log.Print(string(data))
 }
 
+type WebSocketMsgType int
+
+func (this WebSocketMsgType) String() string {
+	switch this {
+	case 1:
+		return "TextMessage"
+	case 2:
+		return "BinaryMessage"
+	case 8:
+		return "CloseMessage"
+	case 9:
+		return "PingMessage"
+	case 10:
+		return "PongMessage"
+	}
+
+	return "unknown"
+}
+
+func readMessage(conn *websocket.Conn, msg chan<- string, mt, exit chan<- int) {
+	for {
+		_mt, _msg, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("read message error:%v", err)
+			exit <- 1
+			return
+		}
+		log.Printf("[%s][%s]", WebSocketMsgType(_mt), string(_msg))
+		msg <- string(_msg)
+		mt <- _mt
+	}
+}
+
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	connReq, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Print("upgrade err:", err)
 		return
 	}
-	defer conn.Close()
+	defer connReq.Close()
 
 	u := url.URL{Scheme: "ws", Host: r.Host, Path: r.URL.Path}
 	log.Printf("connecting to %s", u.String())
 
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	connRes, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
-		log.Fatal("dial:", err)
+		log.Print("dial:", err)
+		return
 	}
-	defer c.Close()
+	defer connRes.Close()
 
-	var wg sync.WaitGroup
+	exitReq := make(chan int, 1)
+	exitRes := make(chan int, 1)
 
-	go func() {
-		//client read
-		wg.Add(1)
-		for {
-			mt, message, err := c.ReadMessage()
-			if err != nil {
-				log.Print("response read err:", err)
-				return
-			}
-			log.Printf("response receive: %s", string(message))
-			err = conn.WriteMessage(mt, message)
-			if err != nil {
-				log.Print("response write err:", err)
-				return
-			}
-		}
-		wg.Done()
-	}()
+	mtReq := make(chan int, 1)
+	mtRes := make(chan int, 1)
 
-	go func() {
-		//server read
-		wg.Add(1)
-		for {
-			mt, msg, err := conn.ReadMessage()
-			if err != nil {
-				log.Print("request readMessage err:", err)
-				break
+	msgReq := make(chan string, 1)
+	msgRes := make(chan string, 1)
+
+	go readMessage(connReq, msgReq, mtReq, exitReq)
+	go readMessage(connRes, msgRes, mtRes, exitRes)
+
+	for {
+		select {
+		case <-exitRes:
+			goto Exit
+		case <-exitReq:
+			goto Exit
+		case mReq := <-msgReq:
+			if err := connRes.WriteMessage(<-mtReq, []byte(mReq)); err != nil {
+				log.Printf("write message error:%v", err)
+				goto Exit
 			}
-			log.Print("request receive :", string(msg), mt)
-			err = c.WriteMessage(mt, msg)
-			if err != nil {
-				log.Print("request read err:", err)
-				return
+		case mRes := <-msgRes:
+			if err := connReq.WriteMessage(<-mtRes, []byte(mRes)); err != nil {
+				log.Printf("write message error:%v", err)
+				goto Exit
 			}
 		}
-		wg.Done()
-	}()
+	}
 
-	wg.Wait()
+Exit:
+	log.Print(r.RequestURI, " closed>>>>>>>>>>")
 }
 
 func main() {
