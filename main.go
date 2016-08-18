@@ -138,6 +138,7 @@ func main() {
 	domains = strings.Split(domain, ",")
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		//log.Print(r.RequestURI)
 		if strings.EqualFold("websocket", r.Header.Get("Upgrade")) {
 			wsHandler(w, r)
 			return
